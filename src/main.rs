@@ -26,6 +26,7 @@ use axum::{
     response::{IntoResponse, Response},
     routing::{get, post},
 };
+use block_padding::UnpadError;
 use colored::Colorize;
 use futures::{StreamExt, stream::FuturesUnordered};
 use gumdrop::Options;
@@ -669,9 +670,14 @@ async fn main() {
     spawn_blocking(move || {
         match reload_assetbundle_info(&cloned_config_holder, &cloned_asset_version) {
         Ok(_) => {}
-        Err(e) => error!(
-            "Failed to reload assetbundle info. The game may not redownload required assets or start properly! Err: {e}"
-        ),
+        Err(e) => {
+            match e.is::<UnpadError>() {
+                true => error!("Failed to decrypt the assetbundle info file. Most likely the file or version file is out of date."),
+                false => error!(
+                "Failed to reload assetbundle info. The game may not redownload required assets or start properly! Err: {e}"
+            )
+            }
+        },
     }
     }).await.expect("reload_assetbundle_info blocking task failed");
 
