@@ -260,7 +260,7 @@ impl Scenario {
 
                         debug!("Trying to read build motion data from {character_motions_path}");
 
-                        let character_motions_file = fs::File::open(&character_motions_path).unwrap_or_else(|_| panic!("Could not read {}! Please remove the assets folder and try again to redownload assets.", &character_motions_path));
+                        let character_motions_file = fs::File::open(&character_motions_path).unwrap_or_else(|_| panic!("Could not read {}! Please remove the assets folder and try again to redownload assets.", character_motions_path));
 
                         let character_motions: Model3Root = serde_json::from_reader(
                             character_motions_file,

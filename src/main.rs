@@ -980,7 +980,7 @@ pub async fn update_assets(config: &MMLConfig, asset_version: String) -> Result<
 
         for asset in list {
             let client = client.clone();
-            let url = format!("https://{}/{asset}", &base_url.clone());
+            let url = format!("https://{}/{asset}", base_url.clone());
 
             let owned_pb = pb.clone();
             tasks.push(Box::pin(async move {

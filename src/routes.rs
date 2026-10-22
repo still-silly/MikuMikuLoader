@@ -227,7 +227,7 @@ pub async fn gen_cert(Json(payload): Json<CertGenOptions>) -> impl IntoResponse 
 
     info!(
         "Succesfully generated certificate at {} and {}",
-        &payload.cert_name, &payload.cert_key_name
+        payload.cert_name, payload.cert_key_name
     );
     Json(format!(
         "Certificate succesfully generated! It was placed in {}",
@@ -258,7 +258,7 @@ pub async fn gen_ca(Json(payload): Json<CAGenOptions>) -> impl IntoResponse {
 
     info!(
         "Succesfully generated certificate at {} and {}",
-        &payload.ca_file_name, &payload.ca_key_name
+        payload.ca_file_name, payload.ca_key_name
     );
     Json(format!(
         "CA succesfully generated! It was placed in {}",
@@ -409,7 +409,7 @@ pub async fn export_story_to_modpack(
             Ok(_) => {
                 // Encrypt new AssetBundle
 
-                info!("Encrypting new AssetBundle {}", &screen_image_path);
+                info!("Encrypting new AssetBundle {}", screen_image_path);
 
                 let screen_image_path = FPath::new(&screen_image_path);
                 match encrypt(screen_image_path, screen_image_path) {
@@ -463,7 +463,7 @@ pub async fn export_story_to_modpack(
         }
 
         // Encrypt logo AssetBundle, be it the template or newly generated AssetBundle
-        info!("Encrypting new AssetBundle {}", &logo_ab_path);
+        info!("Encrypting new AssetBundle {}", logo_ab_path);
 
         let logo_ab_path = FPath::new(&logo_ab_path);
         match encrypt(logo_ab_path, logo_ab_path) {
