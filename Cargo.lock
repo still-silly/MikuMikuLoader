@@ -1899,7 +1899,6 @@ dependencies = [
  "tokio",
  "tokio-rustls 0.26.5",
  "tower-service",
- "webpki-roots",
 ]
 
 [[package]]
@@ -1948,7 +1947,7 @@ dependencies = [
  "libc",
  "percent-encoding",
  "pin-project-lite",
- "socket2 0.6.5",
+ "socket2 0.5.10",
  "system-configuration",
  "tokio",
  "tower-service",
@@ -3921,7 +3920,7 @@ dependencies = [
 [[package]]
 name = "sekai_injector"
 version = "0.1.0"
-source = "git+https://github.com/still-silly/Sekai-Injector.git#2e0a657adb31825b9e07e2213dad98c066fa7adb"
+source = "git+https://github.com/still-silly/Sekai-Injector.git#e71d7719b3a9ca901efaee25bd191eaa3d9dfc69"
 dependencies = [
  "anyhow",
  "axum 0.8.9",
@@ -5299,15 +5298,6 @@ checksum = "ed63aea5ce73d0ff405984102c42de94fc55a6b75765d621c65262469b3c9b53"
 dependencies = [
  "ring 0.17.14",
  "untrusted 0.9.0",
-]
-
-[[package]]
-name = "webpki-roots"
-version = "1.0.9"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "7dcd9d09a39985f5344844e66b0c530a33843579125f23e21e9f0f220850f22a"
-dependencies = [
- "rustls-pki-types",
 ]
 
 [[package]]

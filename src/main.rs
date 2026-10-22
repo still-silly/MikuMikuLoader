@@ -6,7 +6,6 @@ mod utils;
 
 use std::{
     collections::BTreeMap,
-    error::Error,
     ffi::CString,
     fs::{self, File, OpenOptions, create_dir, create_dir_all},
     io::{Cursor, Read, Write},
@@ -17,7 +16,7 @@ use std::{
     sync::Arc,
 };
 
-use anyhow::Result;
+use anyhow::{Context, Result, bail};
 use axum::{
     Router,
     body::Body,
@@ -174,14 +173,24 @@ struct GenStoryImageBundles {
 struct ReloadAbInfo {}
 
 #[tokio::main]
-async fn main() {
+async fn main() -> std::process::ExitCode {
+    match run().await {
+        Ok(()) => std::process::ExitCode::SUCCESS,
+        Err(err) => {
+            eprintln!("MikuMikuLoader failed: {err:#}");
+            std::process::ExitCode::FAILURE
+        }
+    }
+}
+
+async fn run() -> Result<()> {
     let opts = CommandOptions::parse_args_default_or_exit();
 
     let file_appender = RollingFileAppender::builder()
         .rotation(Rotation::DAILY)
         .filename_prefix("MikuMikuLoader-log.txt")
         .build("logs")
-        .expect("failed to initialize rolling file appender");
+        .context("failed to initialize rolling file appender")?;
 
     let (non_blocking, _guard) = tracing_appender::non_blocking(file_appender);
 
@@ -241,15 +250,19 @@ async fn main() {
 
     let mut config_file_contents = String::new();
 
-    let config_holder: utils::Config = match File::open(config_path) {
+    let config_holder: utils::Config = match File::open(&config_path) {
         Ok(mut file) => {
-            file.read_to_string(&mut config_file_contents).expect("The config file contains non UTF-8 characters, what in the world did you put in it??");
+            file.read_to_string(&mut config_file_contents)
+                .with_context(|| format!("failed to read config file {config_path}"))?;
             toml::from_str(&config_file_contents)
-                .expect("The config file was not formatted properly and could not be read.")
+                .with_context(|| format!("failed to parse config file {config_path}"))?
         }
-        Err(_) => {
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
             warn!("No MikuMikuLoader config found, using defaults!");
             utils::Config::default()
+        }
+        Err(e) => {
+            return Err(e).with_context(|| format!("failed to open config file {config_path}"));
         }
     };
 
@@ -265,19 +278,14 @@ async fn main() {
             "All credit for reverse engineering assetbundle encryption goes to https://github.com/mos9527"
         );
 
-        match decrypt(&decrypt_options.encrypted_path, &decrypt_options.output) {
-            Ok(_) => {
-                info!("Output saved to {}", decrypt_options.output.display())
-            }
-            Err(e) => {
-                error!(
-                    "Could not decrypt {}: {}",
-                    decrypt_options.encrypted_path.display(),
-                    e
-                )
-            }
-        };
-        return;
+        decrypt(&decrypt_options.encrypted_path, &decrypt_options.output).with_context(|| {
+            format!(
+                "could not decrypt {}",
+                decrypt_options.encrypted_path.display()
+            )
+        })?;
+        info!("Output saved to {}", decrypt_options.output.display());
+        return Ok(());
     } else if let Some(Command::AbEncrypt(ref encrypt_options)) = opts.command {
         info!(
             "Encrypting assetbundle {} into {}",
@@ -288,19 +296,14 @@ async fn main() {
             "All credit for reverse engineering assetbundle encryption goes to https://github.com/mos9527"
         );
 
-        match encrypt(&encrypt_options.decrypted_path, &encrypt_options.output) {
-            Ok(_) => {
-                info!("Output saved to {}", encrypt_options.output.display())
-            }
-            Err(e) => {
-                error!(
-                    "Could not encrypt {}: {}",
-                    encrypt_options.decrypted_path.display(),
-                    e
-                )
-            }
-        };
-        return;
+        encrypt(&encrypt_options.decrypted_path, &encrypt_options.output).with_context(|| {
+            format!(
+                "could not encrypt {}",
+                encrypt_options.decrypted_path.display()
+            )
+        })?;
+        info!("Output saved to {}", encrypt_options.output.display());
+        return Ok(());
     } else if let Some(Command::AbInfoDecrypt(ref decrypt_options)) = opts.command {
         info!(
             "Decrypting assetbundle info {} into {}",
@@ -308,16 +311,23 @@ async fn main() {
             decrypt_options.output.display()
         );
 
-        let mut input_file =
-            File::open(&decrypt_options.encrypted_path).expect("Could not read input file.");
+        let mut input_file = File::open(&decrypt_options.encrypted_path).with_context(|| {
+            format!(
+                "could not open {}",
+                decrypt_options.encrypted_path.display()
+            )
+        })?;
 
-        let mut output_file =
-            File::create(&decrypt_options.output).expect("Could not open output file for writing.");
+        let mut output_file = File::create(&decrypt_options.output)
+            .with_context(|| format!("could not create {}", decrypt_options.output.display()))?;
 
         let mut byte_buffer = Vec::new();
-        input_file
-            .read_to_end(&mut byte_buffer)
-            .expect("Could not read input file.");
+        input_file.read_to_end(&mut byte_buffer).with_context(|| {
+            format!(
+                "could not read {}",
+                decrypt_options.encrypted_path.display()
+            )
+        })?;
 
         debug!(
             "attempting decryption with {} region keys",
@@ -327,21 +337,20 @@ async fn main() {
         match get_apimanager_keys(&config_holder.region) {
             Some(keys) => {
                 debug!("Key len: {} IV len: {}", keys.0.len(), keys.1.len());
-                let decrypted = decrypt_aes_cbc(&byte_buffer, keys.0, keys.1).unwrap();
+                let decrypted = decrypt_aes_cbc(&byte_buffer, keys.0, keys.1)?;
 
-                output_file
-                    .write_all(&decrypted)
-                    .expect("Could not write to output file.");
+                output_file.write_all(&decrypted).with_context(|| {
+                    format!("could not write {}", decrypt_options.output.display())
+                })?;
             }
             None => {
-                error!(
-                    "No valid decryption keys found for region {}",
+                bail!(
+                    "no valid decryption keys found for region {}",
                     config_holder.region
                 );
-                std::process::exit(1);
             }
         }
-        return;
+        return Ok(());
     } else if let Some(Command::AbInfoEncrypt(ref encrypt_options)) = opts.command {
         info!(
             "Encrypting assetbundle {} into {}",
@@ -349,16 +358,23 @@ async fn main() {
             encrypt_options.output.display()
         );
 
-        let mut input_file =
-            File::open(&encrypt_options.decrypted_path).expect("Could not read input file.");
+        let mut input_file = File::open(&encrypt_options.decrypted_path).with_context(|| {
+            format!(
+                "could not open {}",
+                encrypt_options.decrypted_path.display()
+            )
+        })?;
 
-        let mut output_file =
-            File::create(&encrypt_options.output).expect("Could not open output file for writing.");
+        let mut output_file = File::create(&encrypt_options.output)
+            .with_context(|| format!("could not create {}", encrypt_options.output.display()))?;
 
         let mut byte_buffer = Vec::new();
-        input_file
-            .read_to_end(&mut byte_buffer)
-            .expect("Could not read input file.");
+        input_file.read_to_end(&mut byte_buffer).with_context(|| {
+            format!(
+                "could not read {}",
+                encrypt_options.decrypted_path.display()
+            )
+        })?;
 
         debug!(
             "attempting encryption with {} region keys",
@@ -368,64 +384,48 @@ async fn main() {
         match get_apimanager_keys(&config_holder.region) {
             Some(keys) => {
                 debug!("Key len: {} IV len: {}", keys.0.len(), keys.1.len());
-                let encrypted = encrypt_aes_cbc(&byte_buffer, keys.0, keys.1).unwrap();
+                let encrypted = encrypt_aes_cbc(&byte_buffer, keys.0, keys.1)?;
 
-                output_file
-                    .write_all(&encrypted)
-                    .expect("Could not write to output file.");
+                output_file.write_all(&encrypted).with_context(|| {
+                    format!("could not write {}", encrypt_options.output.display())
+                })?;
             }
             None => {
-                error!(
-                    "No valid decryption keys found for region {}",
+                bail!(
+                    "no valid encryption keys found for region {}",
                     config_holder.region
                 );
-                std::process::exit(1);
             }
         }
-        return;
+        return Ok(());
     } else if let Some(Command::GenAssetBundle(options)) = opts.command {
         info!(
             "Converting {} into an assetbundle!",
             options.assetbundle_path.display()
         );
 
-        let modpack_data = fs::read_to_string(&options.assetbundle_path).unwrap_or_else(|_| {
-            panic!(
-                "Could not read {}! Please try redownloading mods and fixing permissions.",
-                options.assetbundle_path.display()
-            )
-        });
+        let modpack_data = fs::read_to_string(&options.assetbundle_path)
+            .with_context(|| format!("could not read {}", options.assetbundle_path.display()))?;
 
-        let mod_data: ModData = toml::from_str(&modpack_data).unwrap_or_else(|_| {
-            panic!(
-                "{} is not formatted properly! Check if MikuMikuLoader is out of date.",
-                options.assetbundle_path.display()
-            )
-        });
+        let mod_data: ModData = toml::from_str(&modpack_data)
+            .with_context(|| format!("could not parse {}", options.assetbundle_path.display()))?;
 
-        create_assetbundle(mod_data, Some(options.output), true).unwrap();
+        create_assetbundle(mod_data, Some(options.output), true)?;
 
-        return;
+        return Ok(());
     } else if let Some(Command::GenStoryImageBundles(options)) = opts.command {
-        // TODO: Something other than many unwraps, this is very messy
-
         // If we just want to extract the images and exit
         if let Some(extraction_path) = options.extract_path {
             if !extraction_path.is_dir() {
-                error!("{} is not an directory!", extraction_path.display());
-                return;
+                bail!("{} is not a directory", extraction_path.display());
             } else {
-                Python::attach(|py| {
-                    let filename = CString::new("story_to_assetbundle.py").unwrap();
-                    let modname = CString::new("story_to_assetbundle").unwrap();
+                Python::attach(|py| -> Result<()> {
+                    let filename = CString::new("story_to_assetbundle.py")?;
+                    let modname = CString::new("story_to_assetbundle")?;
 
-                    let module = PyModule::from_code(
-                        py,
-                        &CString::new(PY_CODE).unwrap(),
-                        &filename,
-                        &modname,
-                    )
-                    .unwrap();
+                    let module =
+                        PyModule::from_code(py, &CString::new(PY_CODE)?, &filename, &modname)
+                            .context("could not load story conversion Python module")?;
 
                     let assetbundle_array =
                         if let Some(logo_assetbundle_path) = options.result_logo_assetbundle_path {
@@ -454,34 +454,39 @@ async fn main() {
                             "logo",
                         ] {
                             module
-                                .getattr("set_asset_path")
-                                .unwrap()
+                                .getattr("set_asset_path")?
                                 .call1((&options
                                     .screen_image_path
                                     .clone()
                                     .unwrap_or(assetbundle_path.to_string()),))
-                                .unwrap();
+                                .context("could not set asset path")?;
 
                             match depythonize::<Vec<u8>>(
                                 &module
-                                    .getattr("return_texture2d_img")
-                                    .unwrap()
+                                    .getattr("return_texture2d_img")?
                                     .call1((&img_name,))
-                                    .unwrap()
-                                    .extract()
-                                    .unwrap(),
+                                    .with_context(|| format!("could not read image {img_name}"))?
+                                    .extract()?,
                             ) {
                                 Ok(loaded_image) => {
                                     if !loaded_image.is_empty() {
                                         let img = ImageReader::new(Cursor::new(loaded_image))
                                             .with_guessed_format()
-                                            .unwrap()
+                                            .with_context(|| {
+                                                format!(
+                                                    "could not detect image format for {img_name}"
+                                                )
+                                            })?
                                             .decode()
-                                            .unwrap();
+                                            .with_context(|| {
+                                                format!("could not decode image {img_name}")
+                                            })?;
 
                                         let mut dest_path = extraction_path.clone();
                                         dest_path.push(format!("{img_name}.png"));
-                                        img.save(&dest_path).unwrap();
+                                        img.save(&dest_path).with_context(|| {
+                                            format!("could not save {}", dest_path.display())
+                                        })?;
 
                                         info!("Saved image to {}", dest_path.display());
                                     } else {
@@ -492,9 +497,10 @@ async fn main() {
                             }
                         }
                     }
-                });
+                    Ok(())
+                })?;
 
-                return;
+                return Ok(());
             }
         }
 
@@ -504,7 +510,7 @@ async fn main() {
             info!("Generating screen_image!");
             tokio::fs::copy("assets/story/screen_image/screen_image", &screen_image_path)
                 .await
-                .unwrap();
+                .context("could not copy screen image assetbundle")?;
 
             spawn_blocking(move || {
                 generate_screen_image(
@@ -513,10 +519,10 @@ async fn main() {
                     options.story_bg,
                     options.story_title,
                 )
-                .unwrap();
+                .context("could not generate screen image")
             })
             .await
-            .expect("generate_screen_image blocking task failed");
+            .context("generate_screen_image blocking task failed")??;
         }
 
         // If we are generating the logo
@@ -526,20 +532,18 @@ async fn main() {
 
             tokio::fs::copy("assets/event/logo/logo", &logo_assetbundle_path)
                 .await
-                .unwrap();
+                .context("could not copy logo assetbundle")?;
+
+            let logo_path = options.logo_path.context("new logo path must be set")?;
 
             spawn_blocking(move || {
-                generate_logo(
-                    logo_assetbundle_path,
-                    options.logo_path.expect("New logo path must be set"),
-                )
-                .unwrap();
+                generate_logo(logo_assetbundle_path, logo_path).context("could not generate logo")
             })
             .await
-            .expect("generate_logo blocking task failed");
+            .context("generate_logo blocking task failed")??;
         }
 
-        return;
+        return Ok(());
     }
 
     let injector_config_path = Path::new(&config_holder.advanced.sekai_injector_config_path);
@@ -550,13 +554,11 @@ async fn main() {
     {
         Ok(mut file) => {
             file.read_to_string(&mut injector_file_contents)
-        .expect(
-            "The config file contains non UTF-8 characters, what in the world did you put in it??",
-        );
+                .with_context(|| format!("failed to read {}", injector_config_path.display()))?;
             toml::from_str(&injector_file_contents)
-                .expect("The config file was not formatted properly and could not be read.")
+                .with_context(|| format!("failed to parse {}", injector_config_path.display()))?
         }
-        Err(_) => {
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
             warn!("No sekai injector config found, using a default!");
             Config {
                 inject_resources: true,
@@ -581,6 +583,10 @@ async fn main() {
                     .to_string(),
             }
         }
+        Err(e) => {
+            return Err(e)
+                .with_context(|| format!("failed to open {}", injector_config_path.display()));
+        }
     };
 
     // In the case of the first run, we need to download the versions.json to proceed if it doesn't exist
@@ -598,46 +604,37 @@ async fn main() {
         );
 
         debug!("grabbing versions file from {url}");
-        let resp = client.get(url).send().await.unwrap();
+        let resp = client
+            .get(url)
+            .send()
+            .await
+            .context("failed to download versions file")?
+            .error_for_status()?;
 
         let asset_config = &config_holder.advanced.assets;
 
-        match create_dir_all(&asset_config.asset_path) {
-            Ok(_) => {}
-            Err(e) => {
-                error!(
-                    "Cannot create {}: {e}. Trying to download anyway...",
-                    asset_config.asset_path
-                )
-            }
-        }
+        create_dir_all(&asset_config.asset_path)
+            .with_context(|| format!("cannot create {}", asset_config.asset_path))?;
 
         let mut file = std::fs::File::create(format!("{}/versions.json", asset_config.asset_path))
-            .expect("Failed to write asset to file");
-        let mut content = Cursor::new(resp.bytes().await.unwrap());
-        std::io::copy(&mut content, &mut file).expect("Failed to write asset to file");
+            .context("failed to create versions file")?;
+        let mut content = Cursor::new(
+            resp.bytes()
+                .await
+                .context("failed to read versions response")?,
+        );
+        std::io::copy(&mut content, &mut file).context("failed to write versions file")?;
     }
 
     // Read versions.json and update resource_prefix if it is necessary.
-    let (_, data_version, asset_version) = match update_injection_appversion(
-        &mut injector_config_holder,
-        &config_holder,
-    ) {
-        Ok(version) => version,
-        Err(e) => {
-            let msg = &format!(
-                "Could not update appversion and apphash prefix for assetbundle domain. It is likely injection will never trigger. Err: {e}"
-            );
-            warn!("{msg}");
-            (String::from(""), String::from(""), String::from(""))
-        }
-    };
+    let (_, data_version, asset_version) =
+        update_injection_appversion(&mut injector_config_holder, &config_holder)
+            .context("could not update app version and hash prefixes")?;
 
     if !config_holder.disable_asset_updates.unwrap_or(false) {
-        match update_assets(&config_holder, data_version).await {
-            Ok(_) => {}
-            Err(e) => error!("Could not update assets: {e}\n"),
-        };
+        update_assets(&config_holder, data_version)
+            .await
+            .context("could not update assets")?;
     } else {
         info!("Skipping asset update")
     }
@@ -648,12 +645,10 @@ async fn main() {
             "Reloading assetbundle info hashes! This may trigger multiple redownloads within the game."
         );
 
-        spawn_blocking(move || {
-            reload_assetbundle_info(&config_holder, &asset_version).unwrap();
-        })
-        .await
-        .expect("reload_assetbundle_info blocking task failed");
-        return;
+        spawn_blocking(move || reload_assetbundle_info(&config_holder, &asset_version))
+            .await
+            .context("reload_assetbundle_info blocking task failed")??;
+        return Ok(());
     }
 
     // Reload the assetbundle info cache TODO: Don't reload unless needed
@@ -662,7 +657,7 @@ async fn main() {
     );
 
     if !Path::new("mods").exists() {
-        create_dir("mods").expect("Can not create mods directory");
+        create_dir("mods").context("cannot create mods directory")?;
     }
 
     let cloned_config_holder = config_holder.clone();
@@ -679,7 +674,7 @@ async fn main() {
             }
         },
     }
-    }).await.expect("reload_assetbundle_info blocking task failed");
+    }).await.context("reload_assetbundle_info blocking task failed")?;
 
     let mut sekai_injector_enabled = true;
 
@@ -702,7 +697,7 @@ async fn main() {
 
     let dns_server = SimpleDns::try_load(configure_dns(&injector_config_holder))
         .await
-        .expect("Failed to configure DNS server. Please file a bug report.");
+        .context("failed to configure DNS server")?;
 
     let dns_server_handle = task::spawn(async move {
         info!("Starting DNS server");
@@ -750,7 +745,7 @@ async fn main() {
 
     // Create a client to handle making HTTPS requests
     let https = HttpsConnectorBuilder::new()
-        .with_webpki_roots()
+        .with_native_roots()?
         .https_or_http()
         .enable_all_versions()
         .build();
@@ -820,32 +815,17 @@ async fn main() {
         let (backend_result, dns_result, webui_result) =
             tokio::join!(backend_task, dns_server_handle, webui_server);
 
-        match backend_result {
-            Ok(_) => {}
-            Err(e) => {
-                notify_mml(&format!(
-                    "You might need to run as root/admin.\nCould not start MikuMikuLoader: {e}\n\nCheck the log for more information!"
-                ));
-            }
-        }
-
-        match dns_result {
-            Ok(Ok(_)) => println!("DNS server task completed successfully."),
-            Ok(Err(e)) => eprintln!("DNS server error: {e}"),
-            Err(e) => eprintln!("DNS server task panicked: {e}"),
-        }
-
-        webui_result.unwrap();
+        backend_result.context("sekai-injector server task failed")?;
+        dns_result.context("DNS server task failed")??;
+        webui_result.context("web UI server failed")?;
+        Ok(())
     } else {
         let (webui_result, dns_result) = tokio::join!(webui_server, dns_server_handle);
 
-        webui_result.unwrap();
+        webui_result.context("web UI server failed")?;
 
-        match dns_result {
-            Ok(Ok(_)) => println!("DNS server task completed successfully."),
-            Ok(Err(e)) => eprintln!("DNS server error: {e}"),
-            Err(e) => eprintln!("DNS server task panicked: {e}"),
-        }
+        dns_result.context("DNS server task failed")??;
+        Ok(())
     }
 }
 
@@ -964,10 +944,7 @@ pub fn update_injection_appversion(
     ))
 }
 
-pub async fn update_assets(
-    config: &MMLConfig,
-    asset_version: String,
-) -> Result<(), Box<dyn Error>> {
+pub async fn update_assets(config: &MMLConfig, asset_version: String) -> Result<()> {
     // TODO: Implement retries
     let asset_config = &config.advanced.assets;
 
@@ -991,7 +968,7 @@ pub async fn update_assets(
     ]);
 
     let client = reqwest::Client::new();
-    let tasks = FuturesUnordered::<Pin<Box<dyn Future<Output = String>>>>::new();
+    let tasks = FuturesUnordered::<Pin<Box<dyn Future<Output = Result<String>>>>>::new();
 
     let total_requests: u64 = asset_list.iter().map(|files| files.len() as u64).sum();
 
@@ -1012,17 +989,16 @@ pub async fn update_assets(
             debug!("Updating {url}");
             owned_pb.inc(1);
 
-            let resp_result = client.head(&url).send().await;
-            let resp = match resp_result {
-                Ok(resp) => { resp }
-                Err(e) => panic!("Request failed: {e:?}"),
-            };
+            let resp = client.head(&url).send().await
+                .with_context(|| format!("HEAD request failed for {url}"))?
+                .error_for_status()?;
 
             let mut new_etag_val: Option<&str> = None;
 
             if let Some(etag) = resp.headers().get("ETag") {
-                debug!("{} ETag: {}", asset, etag.to_str().unwrap());
-                new_etag_val = Some(etag.to_str().unwrap());
+                let etag = etag.to_str().with_context(|| format!("invalid ETag for {asset}"))?;
+                debug!("{} ETag: {}", asset, etag);
+                new_etag_val = Some(etag);
             } else {
                 error!("Upstream server doesn't support etag, asset url is probably out of date, redownloading asset {url}! Provided headers: {:?}", resp.headers());
             }
@@ -1036,9 +1012,9 @@ pub async fn update_assets(
                     let mut contents = String::new();
 
                     File::open(existing_etag_path)
-                        .expect("Cannot read {}, despite knowing it exists.")
+                        .with_context(|| format!("cannot open {}", existing_etag_path.display()))?
                         .read_to_string(&mut contents)
-                        .unwrap();
+                        .with_context(|| format!("cannot read {}", existing_etag_path.display()))?;
 
                     contents
                 };
@@ -1053,7 +1029,9 @@ pub async fn update_assets(
 
             if !skip_download {
                 debug!("Downloading {asset}");
-                let resp = client.get(url).send().await.unwrap();
+                let resp = client.get(&url).send().await
+                    .with_context(|| format!("GET request failed for {url}"))?
+                    .error_for_status()?;
 
                 // If the asset has parent directory(s), create them
                 let asset_dir = match asset.rfind('/') {
@@ -1061,26 +1039,23 @@ pub async fn update_assets(
                     None => "",
                 };
 
-                match create_dir_all(format!("{}/{asset_dir}", asset_config.asset_path)) {
-                    Ok(_) => {}
-                    Err(e) => {
-                        error!(
-                            "Cannot create {}/{asset_dir}: {e}. Trying to download anyway...", asset_config.asset_path
-                        )
-                    }
-                }
+                create_dir_all(format!("{}/{asset_dir}", asset_config.asset_path))
+                    .with_context(|| format!("cannot create {}/{asset_dir}", asset_config.asset_path))?;
 
-                let mut file = std::fs::File::create(format!("{}/{asset}", asset_config.asset_path)).expect("Failed to write asset to file");
-                let mut content = Cursor::new(resp.bytes().await.unwrap());
-                std::io::copy(&mut content, &mut file).expect("Failed to write asset to file");
+                let mut file = File::create(format!("{}/{asset}", asset_config.asset_path))
+                    .with_context(|| format!("failed to create {asset}"))?;
+                let mut content = Cursor::new(resp.bytes().await
+                    .with_context(|| format!("failed to read response for {asset}"))?);
+                std::io::copy(&mut content, &mut file)
+                    .with_context(|| format!("failed to write {asset}"))?;
             }
 
-            if etag_needs_update && new_etag_val.is_some() {
+            if etag_needs_update && let Some(new_etag_val) = new_etag_val {
                 // Update etag
                 debug!("Storing etag for {asset}");
 
                 match File::create(format!("{}/{asset}.etag", asset_config.asset_path)) {
-                    Ok(mut etag_file) => match write!(etag_file, "{}", new_etag_val.unwrap()) {
+                    Ok(mut etag_file) => match write!(etag_file, "{}", new_etag_val) {
                         Ok(_) => {}
                         Err(e) => {
                             error!(
@@ -1094,7 +1069,7 @@ pub async fn update_assets(
                 }
             }
 
-            format!("Updated {asset}")
+            Ok(format!("Updated {asset}"))
             }));
         }
     }
@@ -1103,7 +1078,7 @@ pub async fn update_assets(
 
     // Wait for all the downloads to complete
     while let Some(result) = stream.next().await {
-        debug!("{result}");
+        debug!("{}", result?);
     }
 
     pb.finish();
@@ -1173,7 +1148,7 @@ fn encrypt(infile: &Path, outfile: &Path) -> std::io::Result<()> {
         fout.write_all(&data[128..])?;
     }
 
-    fout.flush().unwrap();
+    fout.flush()?;
 
     Ok(())
 }
