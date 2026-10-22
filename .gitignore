@@ -25,3 +25,4 @@ rustc-ice-*.txt
 
 # MikuMikuLoader specific
 assets/
+logs/
